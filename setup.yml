@@ -1,0 +1,198 @@
+
+---
+- name: Konfigurasi MariaDB Database Server
+  hosts: dbservers
+  become: yes
+
+  vars:
+    db_name: wordpress_db
+    db_user: wp_user
+    db_pass: password123
+
+  tasks:
+    - name: Update repository
+      apt:
+        update_cache: yes
+
+    - name: Install MariaDB dan PyMySQL
+      apt:
+        name:
+          - mariadb-server
+          - python3-pymysql
+        state: present
+
+    - name: Konfigurasi MariaDB agar menerima koneksi dari jaringan
+      lineinfile:
+        path: /etc/mysql/mariadb.conf.d/50-server.cnf
+        regexp: '^bind-address'
+        line: 'bind-address = 0.0.0.0'
+      notify: Restart MariaDB
+
+    - name: Pastikan MariaDB berjalan
+      service:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Buat database WordPress
+      mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Buat user database WordPress
+      mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_pass }}"
+        host: "192.168.56.10"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+  handlers:
+    - name: Restart MariaDB
+      service:
+        name: mariadb
+        state: restarted
+
+
+- name: Konfigurasi Nginx, PHP, dan WordPress
+  hosts: webservers
+  become: yes
+
+  vars:
+    db_name: wordpress_db
+    db_user: wp_user
+    db_pass: password123
+    db_host: 192.168.56.11
+
+  tasks:
+    - name: Update repository
+      apt:
+        update_cache: yes
+
+    - name: Install Nginx, PHP, dan dependensi WordPress
+      apt:
+        name:
+          - nginx
+          - php-fpm
+          - php-mysql
+          - php-curl
+          - php-gd
+          - php-intl
+          - php-mbstring
+          - php-soap
+          - php-xml
+          - php-xmlrpc
+          - php-zip
+          - curl
+          - tar
+        state: present
+
+    - name: Pastikan Nginx dan PHP-FPM berjalan
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nginx
+        - php8.2-fpm
+
+    - name: Download WordPress
+      get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: /tmp/wordpress.tar.gz
+        mode: '0644'
+
+    - name: Extract WordPress
+      unarchive:
+        src: /tmp/wordpress.tar.gz
+        dest: /var/www/
+        remote_src: yes
+        creates: /var/www/wordpress
+
+    - name: Atur kepemilikan direktori WordPress
+      file:
+        path: /var/www/wordpress
+        owner: www-data
+        group: www-data
+        recurse: yes
+
+    - name: Buat file konfigurasi WordPress
+      copy:
+        src: /var/www/wordpress/wp-config-sample.php
+        dest: /var/www/wordpress/wp-config.php
+        remote_src: yes
+        owner: www-data
+        group: www-data
+        mode: '0640'
+
+    - name: Konfigurasi nama database
+      lineinfile:
+        path: /var/www/wordpress/wp-config.php
+        regexp: "define\\(\\s*'DB_NAME'"
+        line: "define( 'DB_NAME', '{{ db_name }}' );"
+
+    - name: Konfigurasi user database
+      lineinfile:
+        path: /var/www/wordpress/wp-config.php
+        regexp: "define\\(\\s*'DB_USER'"
+        line: "define( 'DB_USER', '{{ db_user }}' );"
+
+    - name: Konfigurasi password database
+      lineinfile:
+        path: /var/www/wordpress/wp-config.php
+        regexp: "define\\(\\s*'DB_PASSWORD'"
+        line: "define( 'DB_PASSWORD', '{{ db_pass }}' );"
+
+    - name: Konfigurasi host database
+      lineinfile:
+        path: /var/www/wordpress/wp-config.php
+        regexp: "define\\(\\s*'DB_HOST'"
+        line: "define( 'DB_HOST', '{{ db_host }}' );"
+
+    - name: Buat konfigurasi Nginx untuk WordPress
+      copy:
+        dest: /etc/nginx/sites-available/wordpress
+        content: |
+          server {
+              listen 80;
+              server_name 192.168.56.10;
+
+              root /var/www/wordpress;
+              index index.php index.html;
+
+              location / {
+                  try_files $uri $uri/ /index.php?$args;
+              }
+
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+              }
+
+              location ~ /\.ht {
+                  deny all;
+              }
+          }
+
+    - name: Aktifkan konfigurasi WordPress
+      file:
+        src: /etc/nginx/sites-available/wordpress
+        dest: /etc/nginx/sites-enabled/wordpress
+        state: link
+        force: yes
+
+    - name: Hapus konfigurasi default Nginx
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Pastikan konfigurasi Nginx valid
+      command: nginx -t
+      changed_when: false
+
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
